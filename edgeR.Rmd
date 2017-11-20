@@ -1,0 +1,357 @@
+---
+title: "Guide for Differential Expression Analysis using edgeR"
+author: "David Requena"
+date: "November 7, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Differential expression analysis using edgeR
+
+## 1. SET UP
+
+### Install and/or call the required libraries
+
+This first block is just to install the dependencies. If already installed, don't run this block.
+```{r Install libraries, eval=TRUE, echo=FALSE}
+# # Import necessary libraries
+# install.packages('knitr')
+# install.packages('matrixStats')
+# install.packages('RColorBrewer')
+# install.packages('gplots')
+# install.packages('ggplot2')
+# install.packages('ggrepel')
+# install.packages('tsne')
+# install.packages('BatchJobs')
+# install.packages('gridExtra')
+# 
+# source("https://bioconductor.org/biocLite.R")
+# biocLite("XML") #In linux, first do: sudo apt-get install libxml2-dev
+# biocLite("BiocParallel", dependencies=TRUE)
+# biocLite("DESeq2", dependencies=TRUE)
+# biocLite("limma", dependencies=TRUE)
+# biocLite("edgeR", dependencies=TRUE)
+# biocLite("biomaRt", dependencies=TRUE)
+# biocLite("pheatmap", dependencies=TRUE)
+```
+
+This block is to call all the required libraries:
+```{r, echo=FALSE}
+library("knitr", quietly = T)
+library("biomaRt", quietly = T)
+library("gplots", quietly = T)
+library("ggplot2", quietly = T)
+library("ggrepel", quietly = T)
+library("gridExtra", quietly = T)
+library("limma", quietly = T)
+library("edgeR", quietly = T)
+library("reshape2", quietly = T)
+```
+
+### Input sample metadata
+
+In this block, you just need to change the working directory:
+```{r "setup"}
+# require("knitr")
+knitr::opts_knit$set(root.dir = "../RNAseq_data") # <<<------------- *** WORKING DIRECTORY ***
+
+# These two tables have to be in your working directory:
+# - A table containing the samples' data (features of interest) and
+# - A table with the gene counts by sample
+sample_data <- "samples_data.tsv"
+counts_data <- "counts_data.tsv"
+```
+
+This block is to read the samples' data.
+There is also an option to work with subsets.
+```{r, echo=FALSE}
+#########################
+# Input sample metadata #
+#########################
+sampledata <- data.frame(read.csv(sample_data, sep = "\t", header = TRUE))
+
+# This is an example of how to work with a subset of the data:
+#sampledata <- sampledata[sampledata$lib_prep != "A",]
+
+sampledata$library_prep <- factor(sampledata$library_prep)
+droplevels(sampledata$id)
+
+# To sort the table by sample name:
+sampledata <- sampledata[order(sampledata$id), ]
+sampledata$patient <- as.character(sampledata$patient)
+rownames(sampledata) <- sampledata$id
+
+nsamples <- nrow(sampledata)
+```
+
+This block is to read the tables with the counts.
+There is also an option to filter out some genes (blacklist).
+```{r, echo=FALSE}
+######################
+# Input counts table #
+######################
+countstable <- data.frame(read.csv(counts_data, sep = "\t", header = FALSE), stringsAsFactors = FALSE)
+
+# Filter out some genes in a pre defined black list:
+blacklist <- data.frame(read.csv("blacklist.tsv", sep = "\t", header = TRUE))
+countstable <- countstable[!(countstable[,1] %in% blacklist[,1]), ]
+
+# Save the gene list, to be used later as row names:
+generows <- unlist(countstable[,1], use.names=FALSE)
+generows <- generows[-1]
+invisible(droplevels(generows))
+
+# This column contains the gene names, we don't need it anymore:
+countstable[,1] <- NULL
+
+# Sort the table by sample name:
+countstable.sorted <- countstable[,order(countstable[1,])]
+
+# Save the samples list, to be used later as column names:
+genecols <- unlist(countstable.sorted[1,], use.names=FALSE)
+droplevels(genecols)
+
+# Convert the values on the table from characters to numbers:
+# First, any string should be removed (names on the first row)
+countstable.sorted <- countstable.sorted[-1,]
+# Then, do the conversion
+countstable.num <- as.data.frame(apply(countstable.sorted, c(1,2), as.integer))
+# Finally, add the row and column names:
+rownames(countstable.num) <- generows
+colnames(countstable.num) <- genecols
+
+# If the sampledata table was filtered in the chunk above, this line will filter
+# the countstable as well. If not, this will do nothing:
+countstable.num <- countstable.num[colnames(countstable.num) %in% sampledata$id]
+
+#####################
+# Remove empty rows #
+#####################
+countstable.num <- countstable.num[ rowSums(countstable.num) > 0, ]
+```
+
+## 2. Exploring the data
+This step will allow us to select which variables we need to include in the model
+The code and description are available in my previous guide: https://github.com/SimonLab-RU/DEseq2
+
+## 3. Data analysis
+
+### Model matrix
+Considering the variables chosen in the previous step, a model will be determined.
+A matrix representing this model is provided in this step.
+```{r, echo=FALSE}
+################
+# Model Matrix #
+################
+# Define the model (design) to use. In our case, our variable of interest is the sample type
+# (normal, tumor or metastasis). But, we have to control by:
+# library preparation -> lib_prep
+# patient -> lib_prep:nested_patient
+# Due patient is collinear with library prep, this should be represented by a combination
+# of lib_prep and a secondary variable (nested patient)
+
+# Specifying the base level
+sampledata$sample_type <- factor(sampledata$sample_type,
+                                 levels = c("normal", "primary", "metastasis"))
+str(sampledata$sample_type)
+
+# Model:
+# 1 represents the intercept, this is the base level of sample type (normal)
+mm <- model.matrix(~1 + sample_type + lib_prep + lib_prep:nested_patient,
+                   data = sampledata)
+
+# Sometimes, the resulting matrix has columns full of zeros. These should be removed:
+mm <- mm[ , colSums(mm) > 0]
+
+# Create the DGE object
+ds.edgeR <- DGEList(counts = countstable.num, genes = rownames(countstable.num))
+```
+
+### Prior filtering
+In order to select an appropriate cut-off, we need to analyze the density plots.
+
+#### Density plots
+```{r, echo=FALSE}
+# Normalized counts per million
+cpm <- cpm(ds.edgeR, normalized.lib.sizes = T)
+
+# Normalized log-counts per million
+lcpm <- cpm(ds.edgeR, log=TRUE, normalized.lib.sizes = T)
+df.lcpm <-  data.frame(lcpm)
+
+# Melt the table. This will be useful fo make many density plots in just one plot, grouping by different features.
+melt_lcpm <- melt(lcpm)
+colnames(melt_lcpm) <- c("gene_id","sample_id","log2cpm")
+melt_lcpm$sample_type <- sampledata$sample_type[melt_lcpm$sample_id]
+
+# Density plot including all the samples, coloring by sample id
+p.logcounts <- ggplot(melt_lcpm) + theme_bw() +
+  geom_density(aes(x = log2cpm, group = sample_id, color = sample_id)) +
+  geom_vline(xintercept = c(-4.8, 1, 2), color = "blue", linetype="dashed") +
+  geom_text(aes(x = -4.8, y = 0.25, hjust = -0.1, label = "x = -4.8")) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 20)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 20)) +
+  labs(x = expression("log"[2]*"(Normalized CPM)"), color = "Sample")
+p.logcounts
+ggsave("Plots/Density/All.jpg", p.logcounts, width = 8, height = 5, dpi = 300)
+
+# Density plot including all samples, coloring by sample type
+p.t.logcounts <- ggplot(melt_lcpm) + theme_bw() +
+  geom_density(aes(x = log2cpm, group = sample_id, color = sample_type), alpha = 0.7) +
+  scale_color_manual(values = c("yellowgreen", "firebrick1", "mediumblue")) +
+  geom_vline(xintercept = c(-4.8, 1, 2), linetype="dashed") +
+  geom_text(aes(x = -4.8, y = 0.25, hjust = -0.1, label = "x = -4.8")) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 20),
+                     limits = c(-6.2, 18), expand = c(0,0)) +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 20),
+                     limits = c(-0.005, 0.5), expand = c(0,0)) +
+  labs(x = expression("log"[2]*"(Normalized CPM)"), color = "Sample")
+p.t.logcounts
+ggsave("Plots/Density/All_sample_type.jpg", p.t.logcounts, width = 16, height = 10, dpi = 300)
+```
+
+#### Additional density plots
+```{r, echo=FALSE}
+# Density plot for each sample type
+tX_colors = list("normal" = "yellowgreen",
+                 "primary" = "firebrick1",
+                 "metastasis" = "mediumblue")
+for (type_X in levels(sampledata$sample_type)) {
+  p.tX.logcounts <- NA
+  p.tX.logcounts <- ggplot(melt_lcpm[melt_lcpm$sample_type == type_X, ]) + theme_bw() +
+    geom_density(aes(x = log2cpm, group = sample_id),
+                 color = tX_colors[[type_X]], show.legend = F) +
+    geom_vline(xintercept = c(-4.8, 1, 2), color = "blue", linetype="dashed") +
+    geom_text(aes(x = -4.8, y = 0.25, hjust = -0.1, label = "x = -4.8")) +
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 20),
+                       limits = c(-6.2, 18), expand = c(0,0)) +
+    scale_y_continuous(breaks = scales::pretty_breaks(n = 20),
+                       limits = c(-0.005, 0.5), expand = c(0,0)) +
+    labs(x = expression("log"[2]*"(Normalized CPM)"), title = paste("Sample:", type_X))
+  p.tX.logcounts
+  ggsave(paste0("Plots/Density/All_", type_X, ".jpg"), p.tX.logcounts, width = 16, height = 10, dpi = 300)
+}
+
+# Density plot for each sample
+for (i in 1:nsamples) {
+  dlc <- density(lcpm[,i])
+  y_local_min <- min(dlc$y[(-6 <= dlc$x) & (dlc$x <= -4)])
+  x_local_min <- dlc$x[dlc$y == y_local_min]
+  
+  p.i.logcounts <- ggplot() + theme_bw() +
+    # Density curve
+    geom_density(aes(x = data.frame(lcpm[,i]), color = "red"), show.legend = F) +
+    # Vertical dashed line at the local minimum
+    geom_vline(xintercept = c(x_local_min, 1, 2), color = "blue", linetype="dashed") +
+    geom_text(aes(x = x_local_min, y = max(dlc$y), hjust = -0.1,
+                  label = paste("x =", x_local_min))) +
+    # Nice axis ticks and labels
+    scale_x_continuous(breaks = scales::pretty_breaks(n = 20)) +
+    scale_y_continuous(breaks = scales::pretty_breaks(n = 20)) +
+    labs(x = expression("log"[2]*"(Normalized CPM)"),
+           title = paste("Sample:", sampledata$id[i]))
+  
+  ggsave(paste0("Plots/Density/", sampledata$id[i], "_log-counts.jpg"),
+         p.i.logcounts, width = 16, height = 10, dpi = 300)
+}
+```
+
+#### Filter the dataset
+```{r, echo=FALSE}
+# Boolean condition according the cut-off selected
+# after the examination of the density plots
+filtered <- rowSums(lcpm >= 1) >= 2
+
+# Number of genes remaining after the filtering
+sum(filtered)
+
+# Filtering the DGE list
+# The library sizes should be dropped, because these need to be recalculated
+ds.edgeR.f <- ds.edgeR[filtered, , keep.lib.sizes = F]
+```
+
+### Comparison
+```{r, echo=FALSE}
+# Normalizing for RNA composition, by finding a set of scaling factors for the library sizes
+# that minimize the log-fold changes between the samples for most genes.
+ds.edgeR.f <- calcNormFactors(ds.edgeR.f, method="TMM")
+
+# Estimating Dispersions
+ds.edgeR.f <- estimateGLMCommonDisp(ds.edgeR.f, design = mm)
+ds.edgeR.f <- estimateGLMTrendedDisp(ds.edgeR.f, design = mm)
+ds.edgeR.f <- estimateGLMTagwiseDisp(ds.edgeR.f, design = mm)
+
+ds.fit <- glmFit(ds.edgeR.f, mm)
+colnames(ds.fit)
+
+# Find the differentially expressed genes between metastasis-normal vs primary-normal
+#
+ds.lrt <- glmLRT(ds.fit, contrast= c(0,-1,1,0,0,0,0,0,0,0,0,0,0,0))
+
+edgeR_result <- topTags(ds.lrt,
+                        n = 20000,
+                        adjust.method = "BH",
+                        sort.by = "PValue",
+                        p.value = 0.05)
+
+# Visualize the comparison (contrast)
+edgeR_result$comparison
+
+# Table of differentially expressed genes
+res <- edgeR_result$table
+```
+
+### Annotation and output table
+This block is to add the names and description of the genes.
+```{r, echo=FALSE}
+#####################
+# Adding gene names #
+#####################
+genemap <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol", "description"),
+                 filters = "ensembl_gene_id",
+                 values = res$genes,
+                 mart = useMart("ensembl", dataset = "hsapiens_gene_ensembl"))
+
+idx <- match(res$genes, genemap$ensembl_gene_id)
+res$symbol <- genemap$hgnc_symbol[idx]
+res$description <- genemap$description[idx]
+
+# Save the results in a CSV table
+write.csv(as.data.frame(res), file = "edgeR_Mets_vs_Prims_(byNorm)_FDR.csv")
+```
+
+### 4. Plots
+```{r, echo=FALSE}
+deGenes <- decideTestsDGE(ds.lrt, p=0.05, adjust.method = "BH", lfc = 0)
+deGenes <- rownames(ds.lrt)[as.logical(deGenes)]
+
+# Exploring inter-sample relations using a multidimensional scaling plot
+# of distances between gene expression profiles
+plotMDS(ds.edgeR.f)
+
+# Plot of the library sizes
+plot(ds.lrt$samples$lib.size)
+
+# Plot of the biological coefficient of variation (BCV)
+# This is the square root of the dispersion parameter
+# in the negative binomial model
+plotBCV(ds.edgeR.f)
+
+# Plot of logFC vs average logCPM
+plotSmear(ds.lrt, de.tags = deGenes)
+abline(h = c(-1, 1), col = "blue")
+
+# More plots available in my previous guide: https://github.com/SimonLab-RU/DEseq2
+```
+
+
+
+
+
+
+
+
