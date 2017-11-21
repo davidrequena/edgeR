@@ -1,4 +1,4 @@
-## Guide for Differential Expression Analysis of RNAseq data using edgeR
+## Guide for the Differential Expression Analysis of RNAseq data using edgeR
 
 Made by David Requena (drequena@rockefeller.edu).
 
