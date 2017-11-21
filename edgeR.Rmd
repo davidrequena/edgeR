@@ -1,5 +1,5 @@
 ---
-title: "Guide for Differential Expression Analysis using edgeR"
+title: "Guide for the Differential Expression Analysis of RNAseq data using edgeR"
 author: "David Requena"
 date: "November 7, 2017"
 output: html_document
@@ -9,8 +9,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-
-# Differential expression analysis using edgeR
+# Guide for the Differential Expression Analysis of RNAseq data using edgeR
 
 ## 1. SET UP
 
