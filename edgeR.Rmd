@@ -287,13 +287,18 @@ ds.edgeR.f <- estimateGLMTagwiseDisp(ds.edgeR.f, design = mm)
 ds.fit <- glmFit(ds.edgeR.f, mm)
 colnames(ds.fit)
 
-
-# Find the differentially expressed genes between
+# Find the differentially expressed genes between:
 # 1) primary vs normal
 # 2) metastasis vs normal
 # 3) metastasis-normal vs primary-normal = metastasis vs primary
+
+# 1) primary vs normal
 # ds.lrt <- glmLRT(ds.fit, coef=2)
+
+# 2) metastasis vs normal
 # ds.lrt <- glmLRT(ds.fit, coef=3)
+
+# 3) metastasis vs primary
 ds.lrt <- glmLRT(ds.fit, contrast= c(0,-1,1,0,0,0,0,0,0,0,0,0,0,0))
 
 edgeR_result <- topTags(ds.lrt,
