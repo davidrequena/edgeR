@@ -287,8 +287,13 @@ ds.edgeR.f <- estimateGLMTagwiseDisp(ds.edgeR.f, design = mm)
 ds.fit <- glmFit(ds.edgeR.f, mm)
 colnames(ds.fit)
 
-# Find the differentially expressed genes between metastasis-normal vs primary-normal
-#
+
+# Find the differentially expressed genes between
+# 1) primary vs normal
+# 2) metastasis vs normal
+# 3) metastasis-normal vs primary-normal = metastasis vs primary
+# ds.lrt <- glmLRT(ds.fit, coef=2)
+# ds.lrt <- glmLRT(ds.fit, coef=3)
 ds.lrt <- glmLRT(ds.fit, contrast= c(0,-1,1,0,0,0,0,0,0,0,0,0,0,0))
 
 edgeR_result <- topTags(ds.lrt,
@@ -320,13 +325,15 @@ res$symbol <- genemap$hgnc_symbol[idx]
 res$description <- genemap$description[idx]
 
 # Save the results in a CSV table
-write.csv(as.data.frame(res), file = "edgeR_Mets_vs_Prims_(byNorm)_FDR.csv")
+write.csv(as.data.frame(res), file = "edgeR_Met_vs_Prim_FDR.csv")
+# write.csv(as.data.frame(res), file = "edgeR_Met_vs_Norm_FDR.csv")
+# write.csv(as.data.frame(res), file = "edgeR_Prim_vs_Norm_FDR.csv")
 ```
 
 ### 4. Plots
 ```{r, echo=FALSE}
 deGenes <- decideTestsDGE(ds.lrt, p=0.05, adjust.method = "BH", lfc = 0)
-deGenes <- rownames(ds.lrt)[as.logical(deGenes)]
+deGenes <- rownames(ds.lrt_MP)[as.logical(deGenes)]
 
 # Exploring inter-sample relations using a multidimensional scaling plot
 # of distances between gene expression profiles
